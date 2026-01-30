@@ -1,6 +1,7 @@
 // vim: sw=2 ts=2 expandtab smartindent
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <unistd.h>
@@ -10,6 +11,8 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netdb.h>
+
+#include "sha1.h"
 
 /*
  * Create a server socket bound to the specified host and port. If 'host'
@@ -186,22 +189,157 @@ static int sock_write(int fd, const unsigned char *buf, size_t len) {
   }
 }
 
+static char char_base64(unsigned char in) {
+  switch (in) {
+    case  0: return 'A';
+    case  1: return 'B';
+    case  2: return 'C';
+    case  3: return 'D';
+    case  4: return 'E';
+    case  5: return 'F';
+    case  6: return 'G';
+    case  7: return 'H';
+    case  8: return 'I';
+    case  9: return 'J';
+    case 10: return 'K';
+    case 11: return 'L';
+    case 12: return 'M';
+    case 13: return 'N';
+    case 14: return 'O';
+    case 15: return 'P';
+    case 16: return 'Q';
+    case 17: return 'R';
+    case 18: return 'S';
+    case 19: return 'T';
+    case 20: return 'U';
+    case 21: return 'V';
+    case 22: return 'W';
+    case 23: return 'X';
+    case 24: return 'Y';
+    case 25: return 'Z';
+    case 26: return 'a';
+    case 27: return 'b';
+    case 28: return 'c';
+    case 29: return 'd';
+    case 30: return 'e';
+    case 31: return 'f';
+    case 32: return 'g';
+    case 33: return 'h';
+    case 34: return 'i';
+    case 35: return 'j';
+    case 36: return 'k';
+    case 37: return 'l';
+    case 38: return 'm';
+    case 39: return 'n';
+    case 40: return 'o';
+    case 41: return 'p';
+    case 42: return 'q';
+    case 43: return 'r';
+    case 44: return 's';
+    case 45: return 't';
+    case 46: return 'u';
+    case 47: return 'v';
+    case 48: return 'w';
+    case 49: return 'x';
+    case 50: return 'y';
+    case 51: return 'z';
+    case 52: return '0';
+    case 53: return '1';
+    case 54: return '2';
+    case 55: return '3';
+    case 56: return '4';
+    case 57: return '5';
+    case 58: return '6';
+    case 59: return '7';
+    case 60: return '8';
+    case 61: return '9';
+    case 62: return '+';
+    case 63: return '/';
+    default: return '?';
+  }
+}
+
+static void fbase64(
+  FILE *fp,
+  unsigned char *data,
+  size_t data_len
+) {
+  for (int i = 0; i < data_len; i += 3) {
+    uint32_t input = 0;
+    if ((i + 0) < data_len) input |= (data[i + 0] << 16);
+    if ((i + 1) < data_len) input |= (data[i + 1] <<  8);
+    if ((i + 2) < data_len) input |= (data[i + 2] <<  0);
+    size_t bytes_available = ((i + 0) < data_len) +
+                             ((i + 1) < data_len) +
+                             ((i + 2) < data_len);
+
+    char x1, x2, x3, x4;
+    x1 = char_base64((input >> 18) & 63);
+    x2 = char_base64((input >> 12) & 63);
+    x3 = char_base64((input >>  6) & 63);
+    x4 = char_base64((input >>  0) & 63);
+
+    switch (bytes_available) {
+      case 3: fprintf(fp, "%c%c%c%c", x1, x2, x3, x4); break;
+      case 2: fprintf(fp, "%c%c%c=" , x1, x2, x3    ); break;
+      case 1: fprintf(fp, "%c%c=="  , x1, x2        ); break;
+    }
+  }
+}
+
+/* handshake */
+static void ws_accept_generate(
+  const char *sec_websocket_key,
+  /* must be large enough to hold 20-byte response
+   * encoded as 28 bytes of base64 */
+  char *dst
+) {
+  static char *websocket_rfc_guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+  size_t both_size = strlen(sec_websocket_key) + strlen(websocket_rfc_guid) + 1;
+  char *both = malloc(both_size);
+  strlcpy(both, sec_websocket_key, both_size);
+  strlcat(both, websocket_rfc_guid, both_size);
+
+  unsigned char hash[20] = {0};
+  /* minus one so it doesn't hash the null terminator */
+  SHA1((unsigned char *)both, both_size - 1, hash);
+
+  fbase64(stderr, hash, 20);
+  fprintf(stderr, "\n");
+}
+
 /*
  * Sample HTTP response to send.
  */
-static const char *HTTP_RES =
-"HTTP/1.0 200 OK\r\n"
-"Content-Length: 46\r\n"
-"Connection: close\r\n"
-"Content-Type: text/html; charset=iso-8859-1\r\n"
-"\r\n"
-"<html>\r\n"
-"<body>\r\n"
-"<p>Test!</p>\r\n"
-"</body>\r\n"
-"</html>\r\n";
+#define HTML_RES \
+"<html>\r\n" \
+"<body>\r\n" \
+"<p>Test!</p>\r\n" \
+"</body>\r\n" \
+"</html>\r\n"
 
 int main() {
+
+  /* generate the HTTP response we will provide to clients */
+  size_t http_response_len;
+  char  *http_response;
+  {
+    FILE *tmp = tmpfile();
+    fprintf(tmp, "HTTP/1.0 200 OK\r\n");
+    fprintf(tmp, "Content-Length: %lu\r\n", strlen(HTML_RES) - 2);
+    fprintf(tmp, "Connection: close\r\n");
+    fprintf(tmp, "Content-Type: text/html; charset=iso-8859-1\r\n");
+    fprintf(tmp, "\r\n");
+
+    fprintf(tmp, "%s", HTML_RES);
+
+    http_response_len = ftell(tmp);
+    http_response = malloc(http_response_len);
+    fseek(tmp, 0, SEEK_SET);
+    fread(http_response, http_response_len, 1, tmp);
+    fclose(tmp);
+  }
+
   int fd = host_bind(NULL, "8081");
 
   if (fd < 0) {
@@ -226,6 +364,8 @@ int main() {
         goto client_drop;
       }
 
+      fprintf(stderr, "%c", x);
+
       /* ignore carriage return */
       if (x == 0x0D) {
         continue;
@@ -240,10 +380,12 @@ int main() {
       }
     }
 
-    sock_write(cfd, (unsigned char *)HTTP_RES, strlen(HTTP_RES));
+    sock_write(cfd, (const unsigned char*)http_response, http_response_len);
 
   client_drop:
     close(cfd);
 
   }
+
+  free(http_response);
 }
