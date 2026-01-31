@@ -288,11 +288,9 @@ static void fbase64(
 }
 
 /* handshake */
-static void ws_accept_generate(
-  const char *sec_websocket_key,
-  /* must be large enough to hold 20-byte response
-   * encoded as 28 bytes of base64 */
-  char *dst
+static void ws_fwrite_sec_accept(
+  FILE *out,
+  const char *sec_websocket_key
 ) {
   static char *websocket_rfc_guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
   size_t both_size = strlen(sec_websocket_key) + strlen(websocket_rfc_guid) + 1;
@@ -303,9 +301,9 @@ static void ws_accept_generate(
   unsigned char hash[20] = {0};
   /* minus one so it doesn't hash the null terminator */
   SHA1((unsigned char *)both, both_size - 1, hash);
+  free(both);
 
-  fbase64(stderr, hash, 20);
-  fprintf(stderr, "\n");
+  fbase64(out, hash, 20);
 }
 
 /*
@@ -321,24 +319,20 @@ static void ws_accept_generate(
 int main() {
 
   /* generate the HTTP response we will provide to clients */
-  size_t http_response_len;
-  char  *http_response;
-  {
-    FILE *tmp = tmpfile();
-    fprintf(tmp, "HTTP/1.0 200 OK\r\n");
-    fprintf(tmp, "Content-Length: %lu\r\n", strlen(HTML_RES) - 2);
-    fprintf(tmp, "Connection: close\r\n");
-    fprintf(tmp, "Content-Type: text/html; charset=iso-8859-1\r\n");
-    fprintf(tmp, "\r\n");
+  // size_t http_response_len;
+  // char  *http_response;
+  // {
+  //   FILE *tmp = open_memstream(&http_response, &http_response_len);
+  //   fprintf(tmp, "HTTP/1.0 200 OK\r\n");
+  //   fprintf(tmp, "Content-Length: %lu\r\n", strlen(HTML_RES) - 2);
+  //   fprintf(tmp, "Connection: close\r\n");
+  //   fprintf(tmp, "Content-Type: text/html; charset=iso-8859-1\r\n");
+  //   fprintf(tmp, "\r\n");
 
-    fprintf(tmp, "%s", HTML_RES);
+  //   fprintf(tmp, "%s", HTML_RES);
 
-    http_response_len = ftell(tmp);
-    http_response = malloc(http_response_len);
-    fseek(tmp, 0, SEEK_SET);
-    fread(http_response, http_response_len, 1, tmp);
-    fclose(tmp);
-  }
+  //   fclose(tmp);
+  // }
 
   int fd = host_bind(NULL, "8081");
 
@@ -356,36 +350,126 @@ int main() {
       return 1;
     }
 
-    int seen_linefeed = 0;
-    for (;;) {
-      unsigned char x;
+    size_t reqbuf_len = 0;
+    char *reqbuf = NULL;
+    {
+      FILE *req = open_memstream(&reqbuf, &reqbuf_len);
 
-      if (sock_read(cfd, &x, 1) < 0) {
-        goto client_drop;
+      int seen_linefeed = 0;
+      for (;;) {
+        unsigned char x;
+
+        if (sock_read(cfd, &x, 1) < 0) {
+          goto client_drop;
+        }
+
+        fprintf(req, "%c", x);
+
+        /* ignore carriage return */
+        if (x == 0x0D) {
+          continue;
+        }
+
+        /* track line feeds */
+        if (x == 0x0A) {
+          if (seen_linefeed) break;
+          seen_linefeed = 1;
+        } else {
+          seen_linefeed = 0;
+        }
       }
 
-      fprintf(stderr, "%c", x);
+      fclose(req);
+    }
 
-      /* ignore carriage return */
-      if (x == 0x0D) {
-        continue;
-      }
+    char path[31] = {0};
+    char key[31] = {0};
+    {
+      FILE *req = fmemopen(reqbuf, reqbuf_len, "r");
 
-      /* track line feeds */
-      if (x == 0x0A) {
-        if (seen_linefeed) break;
-        seen_linefeed = 1;
-      } else {
-        seen_linefeed = 0;
-      }
+      if (fscanf(req, "GET %30s HTTP/1.1\r\n", path) == 0)
+        return 1;
+
+      while (fscanf(req, "Sec-WebSocket-Key: %30s\r\n", key) <= 0)
+        if (fscanf(req, "%*[^\n]\n") == EOF)
+          return 1;
+
+      fclose(req);
+    }
+    fprintf(stderr, "key = \"%s\"\n", key);
+    fprintf(stderr, "path = %s\n", path);
+
+    free(reqbuf);
+
+
+    size_t http_response_len;
+    char  *http_response;
+    {
+      FILE *tmp = open_memstream(&http_response, &http_response_len);
+      fprintf(tmp, "HTTP/1.1 101 Switching Protocols\r\n");
+      fprintf(tmp, "Upgrade: websocket\r\n");
+      fprintf(tmp, "Connection: Upgrade\r\n");
+
+      fprintf(tmp, "Sec-WebSocket-Accept: ");
+      ws_fwrite_sec_accept(tmp, key);
+      fprintf(tmp, "\r\n");
+
+      fprintf(tmp, "\r\n");
+
+      fclose(tmp);
     }
 
     sock_write(cfd, (const unsigned char*)http_response, http_response_len);
+    free(http_response);
+
+    for (;;) {
+      unsigned char first;
+      unsigned char second;
+
+      if (sock_read(cfd, &first,  1) < 0) goto client_drop;
+      if (sock_read(cfd, &second, 1) < 0) goto client_drop;
+
+      uint8_t fin    = (first >> 7) & 1;
+      uint8_t opcode = (first >> 0) & 0b1111;
+
+      uint8_t has_mask = (second >> 7) & 1;
+      uint8_t pl_len   = (second >> 0) & 127;
+
+      fprintf(stderr, "> frame received\n");
+      fprintf(stderr, "fin: %d\n", fin);
+      fprintf(stderr, "opcode: 0x%x\n", opcode);
+      fprintf(stderr, "has_mask: %d\n", has_mask);
+      fprintf(stderr, "pl_len: %d\n", pl_len);
+
+      uint8_t mask[4] = {0};
+      if (has_mask) {
+        if (sock_read(cfd, mask, sizeof(mask)) < 0) goto client_drop;
+      }
+
+      uint8_t *payload = malloc(pl_len);
+      if (sock_read(cfd, payload, pl_len) < 0) goto client_drop;
+      for (int i = 0; i < pl_len; i++) payload[i] ^= mask[i % 4];
+
+      fprintf(stderr, "payload = \"");
+      for (int i = 0; i < pl_len; i++) {
+        fprintf(stderr, "%c", payload[i]);
+      }
+      fprintf(stderr, "\"\n");
+
+      uint8_t intro = first;
+      if (sock_write(cfd, &intro, 1) < 0) goto client_drop;
+
+      uint8_t len = pl_len*2;
+      if (sock_write(cfd, &len, 1) < 0) goto client_drop;
+
+      if (sock_write(cfd, payload, pl_len) < 0) goto client_drop;
+      if (sock_write(cfd, payload, pl_len) < 0) goto client_drop;
+
+      free(payload);
+    }
 
   client_drop:
     close(cfd);
 
   }
-
-  free(http_response);
 }
