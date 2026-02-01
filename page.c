@@ -134,7 +134,7 @@ static int accept_client(int server_fd) {
     socklen_t sa_len = sizeof sa;
     int fd = accept(server_fd, &sa, &sa_len);
     if (fd < 0) {
-      if (errno != EWOULDBLOCK && errno != EAGAIN) 
+      if (errno != EWOULDBLOCK && errno != EAGAIN)
         perror("accept()");
       return -1;
     }
@@ -394,10 +394,10 @@ static int ws_handle(
 
 typedef enum ClientPhase {
   ClientPhase_Empty,
-  ClientPhase_Requesting,
+  ClientPhase_HttpRequesting,
   ClientPhase_Responding,
-  ClientPhase_RespondingWebsocket,
-  ClientPhase_Websocket,
+  ClientPhase_WebsocketResponding,
+  ClientPhase_WebsocketRequesting,
 } ClientPhase;
 
 typedef struct {
@@ -410,11 +410,18 @@ typedef struct {
   struct {
     FILE *file; /* closed after requesting */
     bool seen_linefeed;
-    
+
     /* request data goes in here when file is closed */
     char *buf;
     size_t buf_len;
-  } req;
+  } http_req;
+
+  struct {
+    size_t progress;
+
+    uint8_t fin, opcode, has_mask, payload_len, mask[4];
+    char *payload;
+  } ws_req;
 
   struct {
     /* response data goes in here */
@@ -425,19 +432,41 @@ typedef struct {
 } Client;
 
 static void client_drop(Client *c) {
+  c->phase = ClientPhase_Empty;
   /* free everything, remove from parent list, idk? */
 }
 
-static int client_handle_request(Client *c) {
+static int client_ws_handle_request(Client *c) {
+  size_t buf_len = c->ws_req.payload_len + 2;
+  char *buf = malloc(buf_len);
+
+  int fin = 1;
+  int opcode = 1;
+
+  buf[0] = (fin << 7) | opcode & 0b1111;
+  buf[1] = c->ws_req.payload_len;
+  memcpy(buf + 2, c->ws_req.payload, buf_len);
+  free(c->ws_req.payload);
+
+  /* reset response and move it into that phase */
+  memset(&c->res, 0, sizeof(c->res));
+  c->phase = ClientPhase_WebsocketResponding;
+  c->res.buf = buf;
+  c->res.buf_len = buf_len;
+
+  return 0;
+}
+
+static int client_http_handle_request(Client *c) {
 
   char path[31] = {0};
   char key[31] = {0};
   {
-    fclose(c->req.file);
+    fclose(c->http_req.file);
 
     /* cannot fscanf a memstream, can fscanf an fmemopen */
     /* (can grow a memstream, cannot grow an fmemopen) */
-    FILE *req = fmemopen(c->req.buf, c->req.buf_len, "r");
+    FILE *req = fmemopen(c->http_req.buf, c->http_req.buf_len, "r");
 
     if (fscanf(req, "GET %30s HTTP/1.1\r\n", path) == 0)
       return -1;
@@ -447,7 +476,7 @@ static int client_handle_request(Client *c) {
         break; /* no key found */
 
     fclose(req);
-    free(c->req.buf);
+    free(c->http_req.buf);
   }
 
   fprintf(stderr, "key = \"%s\"\n", key);
@@ -479,6 +508,8 @@ static int client_handle_request(Client *c) {
     fprintf(tmp, "\r\n");
 
     fclose(tmp);
+
+    c->phase = ClientPhase_WebsocketResponding;
   } else {
     static char *four_oh_four = "HTTP/1.1 404 Not Found\r\n\r\n";
     c->res.buf = four_oh_four;
@@ -546,10 +577,13 @@ int main() {
 
         Client *c = clients + (client_i++);
         *c = (Client) {
-          .phase = ClientPhase_Requesting,
+          .phase = ClientPhase_HttpRequesting,
           .net_fd = fd,
         };
-        c->req.file = open_memstream(&c->req.buf, &c->req.buf_len);
+        c->http_req.file = open_memstream(
+          &c->http_req.buf,
+          &c->http_req.buf_len
+        );
       }
     }
 
@@ -570,7 +604,7 @@ int main() {
           case ClientPhase_Empty:
             continue;
 
-          case ClientPhase_Requesting: {
+          case ClientPhase_HttpRequesting: {
             for (;;) {
               char byte;
               int read_ret = read(c->net_fd, &byte, 1);
@@ -582,29 +616,74 @@ int main() {
                 break;
               }
 
-              fprintf(c->req.file, "%c", byte);
+              fprintf(c->http_req.file, "%c", byte);
 
               /* ignore carriage return */
               if (byte != 0x0D) {
                 /* track line feeds */
                 if (byte == 0x0A) {
-                  if (c->req.seen_linefeed) {
-                    if (client_handle_request(c) < 0) {
+                  if (c->http_req.seen_linefeed) {
+                    if (client_http_handle_request(c) < 0) {
                       client_drop(c);
                       break;
                     }
                     goto client_responding;
                   }
-                  c->req.seen_linefeed = 1;
+                  c->http_req.seen_linefeed = 1;
                 } else {
-                  c->req.seen_linefeed = 0;
+                  c->http_req.seen_linefeed = 0;
                 }
               }
             }
           }; break;
 
+          case ClientPhase_WebsocketRequesting: {
+            for (;;) {
+              char byte;
+              int read_ret = read(c->net_fd, &byte, 1);
+              if (read_ret < 0) {
+                if (errno != EWOULDBLOCK && errno != EAGAIN) {
+                  perror("client read()");
+                  client_drop(c);
+                }
+                break;
+              }
+
+              int progress = ++c->ws_req.progress;
+
+              if (progress == 1) {
+                c->ws_req.fin    = (byte >> 7) & 1;
+                c->ws_req.opcode = (byte >> 0) & 0b1111;
+                continue;
+              }
+
+              if (progress == 2) {
+                c->ws_req.has_mask    = (byte >> 7) & 1;
+                c->ws_req.payload_len = (byte >> 0) & 127;
+                c->ws_req.payload     = malloc(c->ws_req.payload_len);
+                continue;
+              }
+
+              int mask_progress = progress - 3;
+              if (c->ws_req.has_mask && mask_progress < 4) {
+                c->ws_req.mask[mask_progress] = byte;
+                continue;
+              }
+
+              int payload_progress = mask_progress - 4;
+              uint8_t mask_byte = c->ws_req.mask[payload_progress % 4];
+              c->ws_req.payload[payload_progress] = byte ^ mask_byte;
+              if (payload_progress == (c->ws_req.payload_len - 1)) {
+                if (client_ws_handle_request(c) < 0)
+                  client_drop(c);
+                goto client_responding;
+              }
+
+            }
+          }; break;
+
         client_responding:
-          case ClientPhase_RespondingWebsocket:
+          case ClientPhase_WebsocketResponding:
           case ClientPhase_Responding: {
 
             while (c->res.progress < c->res.buf_len) {
@@ -618,14 +697,15 @@ int main() {
                 }
                 break;
               }
-
             }
 
             if (c->res.progress == c->res.buf_len) {
-
-              if (c->phase == ClientPhase_RespondingWebsocket) {
+              if (c->phase == ClientPhase_WebsocketResponding) {
                 free(c->res.buf);
-                c->phase = ClientPhase_Websocket;
+
+                /* reset request and move it into that phase */
+                memset(&c->ws_req, 0, sizeof(c->ws_req));
+                c->phase = ClientPhase_WebsocketRequesting;
                 continue;
               }
 
@@ -634,9 +714,6 @@ int main() {
               }
 
             }
-          }; break;
-
-          case ClientPhase_Websocket: {
           }; break;
 
         }
