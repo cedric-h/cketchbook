@@ -125,47 +125,47 @@ static int host_bind(const char *host, const char *port) {
 }
 
 /*
- * Accept a single client on the provided server socket. This is blocking.
+ * Accept a single client on the provided server socket.
  * On error, this returns -1.
  */
 static int accept_client(int server_fd) {
 
-    struct sockaddr sa;
-    socklen_t sa_len = sizeof sa;
-    int fd = accept(server_fd, &sa, &sa_len);
-    if (fd < 0) {
-      if (errno != EWOULDBLOCK && errno != EAGAIN)
-        perror("accept()");
-      return -1;
-    }
+  struct sockaddr sa;
+  socklen_t sa_len = sizeof sa;
+  int fd = accept(server_fd, &sa, &sa_len);
+  if (fd < 0) {
+    if (errno != EWOULDBLOCK && errno != EAGAIN)
+      perror("accept()");
+    return -1;
+  }
 
-    const char *name = NULL;
-    char tmp[INET6_ADDRSTRLEN + 50];
-    switch (sa.sa_family) {
-      case AF_INET:
-        name = inet_ntop(
-          AF_INET,
-          &((struct sockaddr_in *)&sa)->sin_addr,
-          tmp,
-          sizeof tmp
-        );
-        break;
-      case AF_INET6:
-        name = inet_ntop(
-          AF_INET6,
-          &((struct sockaddr_in6 *)&sa)->sin6_addr,
-          tmp,
-          sizeof tmp
-        );
-        break;
-    }
+  const char *name = NULL;
+  char tmp[INET6_ADDRSTRLEN + 50];
+  switch (sa.sa_family) {
+    case AF_INET:
+      name = inet_ntop(
+        AF_INET,
+        &((struct sockaddr_in *)&sa)->sin_addr,
+        tmp,
+        sizeof tmp
+      );
+      break;
+    case AF_INET6:
+      name = inet_ntop(
+        AF_INET6,
+        &((struct sockaddr_in6 *)&sa)->sin6_addr,
+        tmp,
+        sizeof tmp
+      );
+      break;
+  }
 
-    if (name == NULL) {
-      sprintf(tmp, "<unknown: %lu>", (unsigned long)sa.sa_family);
-      name = tmp;
-    }
-    fprintf(stderr, "accepting connection from: %s\n", name);
-    return fd;
+  if (name == NULL) {
+    sprintf(tmp, "<unknown: %lu>", (unsigned long)sa.sa_family);
+    name = tmp;
+  }
+  fprintf(stderr, "accepting connection from: %s\n", name);
+  return fd;
 }
 
 static int sock_read(int fd, unsigned char *buf, size_t len) {
