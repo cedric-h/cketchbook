@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
 
 #include <unistd.h>
 #include <errno.h>
@@ -11,6 +12,9 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netdb.h>
+
+#include <fcntl.h>
+#include <poll.h>
 
 #include "sha1.h"
 
@@ -101,6 +105,8 @@ static int host_bind(const char *host, const char *port) {
       close(fd);
       continue;
     }
+
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
     break;
   }
   if (p == NULL) {
@@ -128,7 +134,8 @@ static int accept_client(int server_fd) {
     socklen_t sa_len = sizeof sa;
     int fd = accept(server_fd, &sa, &sa_len);
     if (fd < 0) {
-      perror("accept()");
+      if (errno != EWOULDBLOCK && errno != EAGAIN) 
+        perror("accept()");
       return -1;
     }
 
@@ -385,6 +392,102 @@ static int ws_handle(
 "</body>\r\n" \
 "</html>\r\n"
 
+typedef enum ClientPhase {
+  ClientPhase_Empty,
+  ClientPhase_Requesting,
+  ClientPhase_Responding,
+  ClientPhase_RespondingWebsocket,
+  ClientPhase_Websocket,
+} ClientPhase;
+
+typedef struct {
+
+  ClientPhase phase;
+
+  int net_fd; /* net fd from accept() */
+
+  /* requesting */
+  struct {
+    FILE *file; /* closed after requesting */
+    bool seen_linefeed;
+    
+    /* request data goes in here when file is closed */
+    char *buf;
+    size_t buf_len;
+  } req;
+
+  struct {
+    /* response data goes in here */
+    char *buf;
+    size_t buf_len, progress;
+  } res;
+
+} Client;
+
+static void client_drop(Client *c) {
+  /* free everything, remove from parent list, idk? */
+}
+
+static int client_handle_request(Client *c) {
+
+  char path[31] = {0};
+  char key[31] = {0};
+  {
+    fclose(c->req.file);
+
+    /* cannot fscanf a memstream, can fscanf an fmemopen */
+    /* (can grow a memstream, cannot grow an fmemopen) */
+    FILE *req = fmemopen(c->req.buf, c->req.buf_len, "r");
+
+    if (fscanf(req, "GET %30s HTTP/1.1\r\n", path) == 0)
+      return -1;
+
+    while (fscanf(req, "Sec-WebSocket-Key: %30s\r\n", key) <= 0)
+      if (fscanf(req, "%*[^\n]\n") == EOF)
+        break; /* no key found */
+
+    fclose(req);
+    free(c->req.buf);
+  }
+
+  fprintf(stderr, "key = \"%s\"\n", key);
+  fprintf(stderr, "path = \"%s\"\n", path);
+
+  c->phase = ClientPhase_Responding;
+
+  if (strcmp(path, "/") == 0) {
+    FILE *tmp = open_memstream(&c->res.buf, &c->res.buf_len);
+    fprintf(tmp, "HTTP/1.0 200 OK\r\n");
+    fprintf(tmp, "Content-Length: %lu\r\n", strlen(HTML_RES) - 2);
+    fprintf(tmp, "Connection: close\r\n");
+    fprintf(tmp, "Content-Type: text/html; charset=iso-8859-1\r\n");
+    fprintf(tmp, "\r\n");
+
+    fprintf(tmp, "%s", HTML_RES);
+
+    fclose(tmp);
+  } else if (strcmp(path, "/chat") == 0) {
+    FILE *tmp = open_memstream(&c->res.buf, &c->res.buf_len);
+    fprintf(tmp, "HTTP/1.1 101 Switching Protocols\r\n");
+    fprintf(tmp, "Upgrade: websocket\r\n");
+    fprintf(tmp, "Connection: Upgrade\r\n");
+
+    fprintf(tmp, "Sec-WebSocket-Accept: ");
+    ws_fwrite_sec_accept(tmp, key);
+    fprintf(tmp, "\r\n");
+
+    fprintf(tmp, "\r\n");
+
+    fclose(tmp);
+  } else {
+    static char *four_oh_four = "HTTP/1.1 404 Not Found\r\n\r\n";
+    c->res.buf = four_oh_four;
+    c->res.buf_len = strlen(four_oh_four);
+  }
+
+  return 0;
+}
+
 int main() {
 
   /* generate the HTTP response we will provide to clients */
@@ -409,10 +512,148 @@ int main() {
     return 1;
   }
 
+
+  uint16_t poll_any_event = 0;
+  poll_any_event |= /* all the writes */ POLLWRNORM | POLLWRBAND;
+  poll_any_event |= /* all the reads  */ POLLPRI | POLLRDNORM | POLLRDBAND;
+
+
+#define CLIENT_MAX 10
+  Client clients[10] = {0};
+  size_t client_i = 0;
+
   /*
-  * Process each client, one at a time.
-  */
+   * Poll and look for things to do
+   */
   for (;;) {
+
+    /* first poll for new clients */
+    {
+      struct pollfd new_client = {
+        .fd = fd,
+        .events = poll_any_event,
+      };
+
+      poll(&new_client, 1, 0);
+
+      if (new_client.revents > 0) for (;;) {
+        int fd = accept_client(new_client.fd);
+        if (fd < 0) {
+          if (errno == EWOULDBLOCK || errno == EAGAIN)
+            break;
+          continue;
+        }
+
+        Client *c = clients + (client_i++);
+        *c = (Client) {
+          .phase = ClientPhase_Requesting,
+          .net_fd = fd,
+        };
+        c->req.file = open_memstream(&c->req.buf, &c->req.buf_len);
+      }
+    }
+
+    /* now see if any clients need responding to */
+    {
+      struct pollfd client_polls[CLIENT_MAX] = {0};
+      for (int i = 0; i < 10; i++) {
+        client_polls[i].fd = clients[i].net_fd;
+        client_polls[i].events = poll_any_event;
+      }
+
+      poll(client_polls, CLIENT_MAX, 0);
+
+      for (int i = 0; i < CLIENT_MAX; i++) {
+        Client *c = clients + i;
+        switch (c->phase) {
+
+          case ClientPhase_Empty:
+            continue;
+
+          case ClientPhase_Requesting: {
+            for (;;) {
+              char byte;
+              int read_ret = read(c->net_fd, &byte, 1);
+              if (read_ret < 0) {
+                if (errno != EWOULDBLOCK && errno != EAGAIN) {
+                  perror("client read()");
+                  client_drop(c);
+                }
+                break;
+              }
+
+              fprintf(c->req.file, "%c", byte);
+
+              /* ignore carriage return */
+              if (byte != 0x0D) {
+                /* track line feeds */
+                if (byte == 0x0A) {
+                  if (c->req.seen_linefeed) {
+                    if (client_handle_request(c) < 0) {
+                      client_drop(c);
+                      break;
+                    }
+                    goto client_responding;
+                  }
+                  c->req.seen_linefeed = 1;
+                } else {
+                  c->req.seen_linefeed = 0;
+                }
+              }
+            }
+          }; break;
+
+        client_responding:
+          case ClientPhase_RespondingWebsocket:
+          case ClientPhase_Responding: {
+
+            while (c->res.progress < c->res.buf_len) {
+              char byte = c->res.buf[c->res.progress++];
+              size_t wlen = write(c->net_fd, &byte, 1);
+
+              if (wlen < 0) {
+                if (errno != EWOULDBLOCK && errno != EAGAIN) {
+                  perror("client write()");
+                  client_drop(c);
+                }
+                break;
+              }
+
+            }
+
+            if (c->res.progress == c->res.buf_len) {
+
+              if (c->phase == ClientPhase_RespondingWebsocket) {
+                free(c->res.buf);
+                c->phase = ClientPhase_Websocket;
+                continue;
+              }
+
+              if (c->phase == ClientPhase_Responding) {
+                client_drop(c);
+              }
+
+            }
+          }; break;
+
+          case ClientPhase_Websocket: {
+          }; break;
+
+        }
+
+      }
+    }
+
+  }
+
+  /*
+   * Process each client, one at a time.
+   */
+  for (;;) {
+
+    // puts("waiting for client ...");
+    // poll(ws_fds, ws_fds_len, -1);
+    // puts("done!");
 
     int cfd = accept_client(fd);
     if (cfd < 0) {
@@ -504,6 +745,7 @@ int main() {
 
   client_drop:
     close(cfd);
+    puts("dropped client");
 
   }
 
