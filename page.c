@@ -168,34 +168,6 @@ static int accept_client(int server_fd) {
   return fd;
 }
 
-static int sock_read(int fd, unsigned char *buf, size_t len) {
-  for (;;) {
-    ssize_t rlen;
-
-    rlen = read(fd, buf, len);
-    if (rlen <= 0) {
-      if (rlen < 0 && errno == EINTR) {
-        continue;
-      }
-      return -1;
-    }
-    return (int)rlen;
-  }
-}
-
-static int sock_write(int fd, const unsigned char *buf, size_t len) {
-  for (;;) {
-    size_t wlen = write(fd, buf, len);
-    if (wlen <= 0) {
-      if (wlen < 0 && errno == EINTR) {
-        continue;
-      }
-      return -1;
-    }
-    return (int)wlen;
-  }
-}
-
 static char char_base64(unsigned char in) {
   switch (in) {
     case  0: return 'A';
@@ -313,75 +285,6 @@ static void ws_fwrite_sec_accept(
   fbase64(out, hash, 20);
 }
 
-static int ws_handle(
-  int cfd
-) {
-  unsigned char first;
-  unsigned char second;
-
-  if (sock_read(cfd, &first,  1) < 0) return 1;
-  if (sock_read(cfd, &second, 1) < 0) return 1;
-
-  uint8_t fin      = (first  >> 7) & 1;
-  uint8_t opcode   = (first  >> 0) & 0b1111;
-  uint8_t has_mask = (second >> 7) & 1;
-  uint8_t pl_len   = (second >> 0) & 127;
-
-  /* TODO: support payloads over 127 chars */
-  if (pl_len == 127 || pl_len == 128) {
-    fprintf(stderr, "we don't support ws messages that big yet");
-    abort();
-  }
-
-  uint8_t mask[4] = {0};
-  if (has_mask) {
-    if (sock_read(cfd, mask, sizeof(mask)) < 0) return 1;
-  }
-
-  uint8_t *payload = malloc(pl_len);
-  if (sock_read(cfd, payload, pl_len) < 0) return 1;
-
-  /* in the event of no mask (never), XOR-ing with 0 harmless */
-  for (int i = 0; i < pl_len; i++) payload[i] ^= mask[i % 4];
-
-  /* if close opcode, print out code and reason */
-  if (opcode == 8) {
-    uint32_t code = (payload[0] << 8) | payload[1];
-    fprintf(stderr, "ws connection ended, code: %d\n", code);
-
-    fprintf(stderr, "reason = \"");
-    for (int i = 2; i < pl_len; i++) {
-      fprintf(stderr, "%c", payload[i]);
-    }
-    fprintf(stderr, "\"\n");
-  }
-
-  /* if text message, print out and send back repeated text-based messages */
-  if (opcode == 1) {
-    fprintf(stderr, "payload = \"");
-    for (int i = 0; i < pl_len; i++) {
-      fprintf(stderr, "%c", payload[i]);
-    }
-    fprintf(stderr, "\"\n");
-
-    /* write back what they said twice */
-    {
-      uint8_t intro = first;
-      if (sock_write(cfd, &intro, 1) < 0) return 1;
-
-      uint8_t len = pl_len*2;
-      if (sock_write(cfd, &len, 1) < 0) return 1;
-
-      if (sock_write(cfd, payload, pl_len) < 0) return 1;
-      if (sock_write(cfd, payload, pl_len) < 0) return 1;
-    }
-  }
-
-  free(payload);
-
-  return 0;
-}
-
 /*
  * Sample HTTP response to send.
  */
@@ -451,7 +354,7 @@ static int client_ws_handle_request(Client *c, Client clients[10]) {
     int fin = 1;
     int opcode = 1;
 
-    buf[0] = (fin << 7) | opcode & 0b1111;
+    buf[0] = (fin << 7) | (opcode & 0b1111);
     buf[1] = c->ws_req.payload_len;
     memcpy(buf + 2, c->ws_req.payload, buf_len);
 
@@ -527,28 +430,11 @@ static int client_http_handle_request(Client *c) {
 
 int main() {
 
-  /* generate the HTTP response we will provide to clients */
-  size_t index_http_res_len;
-  char  *index_http_res;
-  {
-    FILE *tmp = open_memstream(&index_http_res, &index_http_res_len);
-    fprintf(tmp, "HTTP/1.0 200 OK\r\n");
-    fprintf(tmp, "Content-Length: %lu\r\n", strlen(HTML_RES) - 2);
-    fprintf(tmp, "Connection: close\r\n");
-    fprintf(tmp, "Content-Type: text/html; charset=iso-8859-1\r\n");
-    fprintf(tmp, "\r\n");
-
-    fprintf(tmp, "%s", HTML_RES);
-
-    fclose(tmp);
-  }
-
   int fd = host_bind(NULL, "8081");
 
   if (fd < 0) {
     return 1;
   }
-
 
   uint16_t poll_any_event = 0;
   poll_any_event |= /* all the writes */ POLLWRNORM | POLLWRBAND;
@@ -767,108 +653,4 @@ int main() {
 
   }
 
-  /*
-   * Process each client, one at a time.
-   */
-  for (;;) {
-
-    // puts("waiting for client ...");
-    // poll(ws_fds, ws_fds_len, -1);
-    // puts("done!");
-
-    int cfd = accept_client(fd);
-    if (cfd < 0) {
-      return 1;
-    }
-
-    size_t reqbuf_len = 0;
-    char *reqbuf = NULL;
-    {
-      FILE *req = open_memstream(&reqbuf, &reqbuf_len);
-
-      int seen_linefeed = 0;
-      for (;;) {
-        unsigned char x;
-
-        if (sock_read(cfd, &x, 1) < 0) {
-          goto client_drop;
-        }
-
-        fprintf(req, "%c", x);
-
-        /* ignore carriage return */
-        if (x == 0x0D) {
-          continue;
-        }
-
-        /* track line feeds */
-        if (x == 0x0A) {
-          if (seen_linefeed) break;
-          seen_linefeed = 1;
-        } else {
-          seen_linefeed = 0;
-        }
-      }
-
-      fclose(req);
-    }
-
-    char path[31] = {0};
-    char key[31] = {0};
-    {
-      FILE *req = fmemopen(reqbuf, reqbuf_len, "r");
-
-      if (fscanf(req, "GET %30s HTTP/1.1\r\n", path) == 0)
-        return 1;
-
-      while (fscanf(req, "Sec-WebSocket-Key: %30s\r\n", key) <= 0)
-        if (fscanf(req, "%*[^\n]\n") == EOF)
-          break; /* no key found */
-
-      fclose(req);
-    }
-    fprintf(stderr, "key = \"%s\"\n", key);
-    fprintf(stderr, "path = %s\n", path);
-
-    free(reqbuf);
-
-    if (strcmp(path, "/") == 0) {
-      sock_write(cfd, (const uint8_t *)index_http_res, index_http_res_len);
-    } else if (strcmp(path, "/chat") == 0) {
-      size_t ws_http_response_len;
-      char  *ws_http_response;
-      {
-        FILE *tmp = open_memstream(&ws_http_response, &ws_http_response_len);
-        fprintf(tmp, "HTTP/1.1 101 Switching Protocols\r\n");
-        fprintf(tmp, "Upgrade: websocket\r\n");
-        fprintf(tmp, "Connection: Upgrade\r\n");
-
-        fprintf(tmp, "Sec-WebSocket-Accept: ");
-        ws_fwrite_sec_accept(tmp, key);
-        fprintf(tmp, "\r\n");
-
-        fprintf(tmp, "\r\n");
-
-        fclose(tmp);
-      }
-
-      sock_write(cfd, (const uint8_t *)ws_http_response, ws_http_response_len);
-      free(ws_http_response);
-
-      /* parse and respond to websocket messages forever */
-      for (;;)
-        if (ws_handle(cfd) == 1)
-          goto client_drop;
-    } else {
-      static char *four_oh_four = "HTTP/1.1 404 Not Found\r\n\r\n";
-      sock_write(cfd, (const uint8_t *)four_oh_four, strlen(four_oh_four));
-    }
-
-  client_drop:
-    close(cfd);
-    puts("dropped client");
-
-  }
-
-  free(index_http_res);
 }
