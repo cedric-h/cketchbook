@@ -395,9 +395,8 @@ static int ws_handle(
 typedef enum ClientPhase {
   ClientPhase_Empty,
   ClientPhase_HttpRequesting,
-  ClientPhase_Responding,
-  ClientPhase_WebsocketResponding,
-  ClientPhase_WebsocketRequesting,
+  ClientPhase_HttpResponding,
+  ClientPhase_Websocket,
 } ClientPhase;
 
 typedef struct {
@@ -427,6 +426,8 @@ typedef struct {
     /* response data goes in here */
     char *buf;
     size_t buf_len, progress;
+
+    ClientPhase phase_after_http;
   } res;
 
 } Client;
@@ -436,23 +437,28 @@ static void client_drop(Client *c) {
   /* free everything, remove from parent list, idk? */
 }
 
-static int client_ws_handle_request(Client *c) {
-  size_t buf_len = c->ws_req.payload_len + 2;
-  char *buf = malloc(buf_len);
+static int client_ws_handle_request(Client *c, Client clients[10]) {
 
-  int fin = 1;
-  int opcode = 1;
+  for (int i = 0; i < 10; i++) {
+    Client *other = clients + i;
+    if (other->phase != ClientPhase_Websocket) continue;
+    /* right now we can only write out one message at at time */
+    if (other->res.progress != 0) continue;
 
-  buf[0] = (fin << 7) | opcode & 0b1111;
-  buf[1] = c->ws_req.payload_len;
-  memcpy(buf + 2, c->ws_req.payload, buf_len);
-  free(c->ws_req.payload);
+    size_t buf_len = c->ws_req.payload_len + 2;
+    char *buf = malloc(buf_len);
 
-  /* reset response and move it into that phase */
-  memset(&c->res, 0, sizeof(c->res));
-  c->phase = ClientPhase_WebsocketResponding;
-  c->res.buf = buf;
-  c->res.buf_len = buf_len;
+    int fin = 1;
+    int opcode = 1;
+
+    buf[0] = (fin << 7) | opcode & 0b1111;
+    buf[1] = c->ws_req.payload_len;
+    memcpy(buf + 2, c->ws_req.payload, buf_len);
+
+    /* reset response and copy in our new response */
+    other->res.buf = buf;
+    other->res.buf_len = buf_len;
+  }
 
   return 0;
 }
@@ -482,7 +488,8 @@ static int client_http_handle_request(Client *c) {
   fprintf(stderr, "key = \"%s\"\n", key);
   fprintf(stderr, "path = \"%s\"\n", path);
 
-  c->phase = ClientPhase_Responding;
+  c->phase = ClientPhase_HttpResponding;
+  c->res.phase_after_http = ClientPhase_Empty;
 
   if (strcmp(path, "/") == 0) {
     FILE *tmp = open_memstream(&c->res.buf, &c->res.buf_len);
@@ -508,8 +515,7 @@ static int client_http_handle_request(Client *c) {
     fprintf(tmp, "\r\n");
 
     fclose(tmp);
-
-    c->phase = ClientPhase_WebsocketResponding;
+    c->res.phase_after_http = ClientPhase_Websocket;
   } else {
     static char *four_oh_four = "HTTP/1.1 404 Not Found\r\n\r\n";
     c->res.buf = four_oh_four;
@@ -599,6 +605,8 @@ int main() {
 
       for (int i = 0; i < CLIENT_MAX; i++) {
         Client *c = clients + i;
+
+        restart:
         switch (c->phase) {
 
           case ClientPhase_Empty:
@@ -627,7 +635,7 @@ int main() {
                       client_drop(c);
                       break;
                     }
-                    goto client_responding;
+                    goto restart;
                   }
                   c->http_req.seen_linefeed = 1;
                 } else {
@@ -637,7 +645,62 @@ int main() {
             }
           }; break;
 
-          case ClientPhase_WebsocketRequesting: {
+          case ClientPhase_HttpResponding: {
+
+            while (c->res.progress < c->res.buf_len) {
+              char byte = c->res.buf[c->res.progress];
+              size_t wlen = write(c->net_fd, &byte, 1);
+
+              if (wlen < 0) {
+                if (errno != EWOULDBLOCK && errno != EAGAIN) {
+                  perror("client write()");
+                  client_drop(c);
+                }
+                break;
+              }
+
+              /* important to only increase this if write succeeds */
+              c->res.progress += 1;
+            }
+
+            if (c->res.progress == c->res.buf_len) {
+              if (c->res.phase_after_http == ClientPhase_Empty) {
+                client_drop(c);
+              } else {
+                c->phase = c->res.phase_after_http;
+                goto restart;
+              }
+            }
+          }; break;
+
+          case ClientPhase_Websocket: {
+
+            /* first, let's send out anything we can */
+            {
+              while (c->res.progress < c->res.buf_len) {
+                char byte = c->res.buf[c->res.progress];
+                size_t wlen = write(c->net_fd, &byte, 1);
+
+                if (wlen < 0) {
+                  if (errno != EWOULDBLOCK && errno != EAGAIN) {
+                    perror("client write()");
+                    client_drop(c);
+                  }
+                  break;
+                }
+
+                /* important to only increase this if write succeeds */
+                c->res.progress += 1;
+              }
+
+              if (c->res.progress == c->res.buf_len) {
+                /* done writing, we can reset response */
+                free(c->res.buf);
+                memset(&c->res, 0, sizeof(c->res));
+              }
+            }
+
+            /* now let's see if there's anything to receive */
             for (;;) {
               char byte;
               int read_ret = read(c->net_fd, &byte, 1);
@@ -660,6 +723,15 @@ int main() {
               if (progress == 2) {
                 c->ws_req.has_mask    = (byte >> 7) & 1;
                 c->ws_req.payload_len = (byte >> 0) & 127;
+                if (c->ws_req.payload_len == 127 ||
+                    c->ws_req.payload_len == 126) {
+                  fprintf(
+                    stderr,
+                    "WS payloads > 126 bytes are not yet supported!\n"
+                  );
+                  client_drop(c);
+                  break;
+                }
                 c->ws_req.payload     = malloc(c->ws_req.payload_len);
                 continue;
               }
@@ -674,43 +746,15 @@ int main() {
               uint8_t mask_byte = c->ws_req.mask[payload_progress % 4];
               c->ws_req.payload[payload_progress] = byte ^ mask_byte;
               if (payload_progress == (c->ws_req.payload_len - 1)) {
-                if (client_ws_handle_request(c) < 0)
+                if (client_ws_handle_request(c, clients) < 0)
                   client_drop(c);
-                goto client_responding;
-              }
 
-            }
-          }; break;
-
-        client_responding:
-          case ClientPhase_WebsocketResponding:
-          case ClientPhase_Responding: {
-
-            while (c->res.progress < c->res.buf_len) {
-              char byte = c->res.buf[c->res.progress++];
-              size_t wlen = write(c->net_fd, &byte, 1);
-
-              if (wlen < 0) {
-                if (errno != EWOULDBLOCK && errno != EAGAIN) {
-                  perror("client write()");
-                  client_drop(c);
-                }
-                break;
-              }
-            }
-
-            if (c->res.progress == c->res.buf_len) {
-              if (c->phase == ClientPhase_WebsocketResponding) {
-                free(c->res.buf);
-
-                /* reset request and move it into that phase */
+                /* let's reset the request so we can
+                 * start receiving a new one */
+                free(c->ws_req.payload);
                 memset(&c->ws_req, 0, sizeof(c->ws_req));
-                c->phase = ClientPhase_WebsocketRequesting;
-                continue;
-              }
 
-              if (c->phase == ClientPhase_Responding) {
-                client_drop(c);
+                goto restart;
               }
 
             }
