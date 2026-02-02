@@ -1,4 +1,4 @@
-<video src='./readme_assets/capture.mov' width=180/>
+<video src='./readme_assets/capture.mov' width=180 />
 
 # dev
 
