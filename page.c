@@ -289,10 +289,98 @@ static void ws_fwrite_sec_accept(
  * Sample HTTP response to send.
  */
 #define HTML_RES \
-"<html>\r\n" \
-"<body>\r\n" \
-"<p>Test!</p>\r\n" \
-"</body>\r\n" \
+"<!DOCTYPE html>\r\n" \
+"<html lang='en'>\r\n" \
+"  <head>\r\n" \
+"    <meta charset='utf-8' />\r\n" \
+"    <title>Cketchbook</title>\r\n" \
+"    <style> document, body { margin: 0px; padding: 0px; overflow: hidden; } </style>\r\n" \
+"  </head>\r\n" \
+"\r\n" \
+"  <body>\r\n" \
+"    <canvas id='pagecanvas'></canvas>\r\n" \
+"    <script>'use strict'; (async () => {\r\n" \
+"const ws = new WebSocket('/chat');\r\n" \
+"await new Promise(res => ws.onopen = res);\r\n" \
+"\r\n" \
+"const canvas = document.getElementById('pagecanvas');\r\n" \
+"const ctx = canvas.getContext('2d');\r\n" \
+"(window.onresize = () => {\r\n" \
+"  canvas.width = window.innerWidth*window.devicePixelRatio,\r\n" \
+"  canvas.height = window.innerHeight*window.devicePixelRatio\r\n" \
+"  canvas.style.width = window.innerWidth + 'px';\r\n" \
+"  canvas.style.height = window.innerHeight + 'px';\r\n" \
+"})();\r\n" \
+"\r\n" \
+"let input = {\r\n" \
+"  mouse_down: false,\r\n" \
+"  local_paths: [],\r\n" \
+"  server_paths: new Map(),\r\n" \
+"};\r\n" \
+"ws.onmessage = msg => {\r\n" \
+"  const [user_id, path_id, x, y] = msg\r\n" \
+"    .data\r\n" \
+"    .split(', ')\r\n" \
+"    .map(x => parseInt(x));\r\n" \
+"  const path_hash = user_id + '_' + path_id;\r\n" \
+"  if (!input.server_paths.has(path_hash))\r\n" \
+"    input.server_paths.set(path_hash, []);\r\n" \
+"  input.server_paths.get(path_hash).push({ x, y });\r\n" \
+"};\r\n" \
+"\r\n" \
+"canvas.onmousedown = ev => {\r\n" \
+"  ev.preventDefault();\r\n" \
+"  input.mouse_down = true;\r\n" \
+"  input.local_paths.push([]);\r\n" \
+"};\r\n" \
+"canvas.onmouseup = ev => {\r\n" \
+"  ev.preventDefault();\r\n" \
+"  input.mouse_down = false;\r\n" \
+"};\r\n" \
+"canvas.onmousemove = ev => {\r\n" \
+"  ev.preventDefault();\r\n" \
+"  if (!input.mouse_down) return false;\r\n" \
+"  const x = ev.clientX * window.devicePixelRatio;\r\n" \
+"  const y = ev.clientY * window.devicePixelRatio;\r\n" \
+"  input.local_paths.at(-1).push({ x, y });\r\n" \
+"  ws.send(\r\n" \
+"    (input.local_paths.length - 1) +\r\n" \
+"      ', ' +\r\n" \
+"      x.toFixed(0) +\r\n" \
+"      ', ' +\r\n" \
+"      y.toFixed(0)\r\n" \
+"  );\r\n" \
+"}\r\n" \
+"\r\n" \
+"requestAnimationFrame(function render(now) {\r\n" \
+"  requestAnimationFrame(render);\r\n" \
+"\r\n" \
+"  ctx.fillStyle = 'white';\r\n" \
+"  ctx.fillRect(0, 0, canvas.width, canvas.height);\r\n" \
+"\r\n" \
+"  {\r\n" \
+"    ctx.beginPath();\r\n" \
+"    for (const path of input.server_paths.values()) {\r\n" \
+"      for (let i = 0; i < path.length; i++) {\r\n" \
+"        const p = path[i];\r\n" \
+"        ctx[i ? 'lineTo' : 'moveTo'](p.x, p.y);\r\n" \
+"\r\n" \
+"        // show verts\r\n" \
+"        // ctx.fillStyle = 'purple';\r\n" \
+"        // const size = 20;\r\n" \
+"        // ctx.fillRect(p.x - size*0.5, p.y - size*0.5, size, size);\r\n" \
+"      }\r\n" \
+"    }\r\n" \
+"    ctx.lineWidth = 4 * window.devicePixelRatio;\r\n" \
+"    ctx.stroke();\r\n" \
+"    ctx.closePath();\r\n" \
+"  }\r\n" \
+"})\r\n" \
+"\r\n" \
+"function lerp(v0, v1, t) { return (1 - t) * v0 + t * v1; }\r\n" \
+"function inv_lerp(min, max, p) { return (p - min) / (max - min); }\r\n" \
+"    })();</script>\r\n" \
+"  </body>\r\n" \
 "</html>\r\n"
 
 typedef enum ClientPhase {
@@ -306,6 +394,7 @@ typedef struct {
 
   ClientPhase phase;
 
+  size_t id;
   int net_fd; /* net fd from accept() */
 
   /* requesting */
@@ -348,19 +437,36 @@ static int client_ws_handle_request(Client *c, Client clients[10]) {
     /* right now we can only write out one message at at time */
     if (other->res.progress != 0) continue;
 
-    size_t buf_len = c->ws_req.payload_len + 2;
-    char *buf = malloc(buf_len);
+    char *out;
+    size_t out_len;
+    FILE *tmp = open_memstream(&out, &out_len);
+    {
 
-    int fin = 1;
-    int opcode = 1;
+      /* WS frame header */
+      {
+        uint8_t fin = 1;
+        uint8_t opcode = 1;
+        uint8_t byte;
 
-    buf[0] = (fin << 7) | (opcode & 0b1111);
-    buf[1] = c->ws_req.payload_len;
-    memcpy(buf + 2, c->ws_req.payload, buf_len);
+        byte = (fin << 7) | (opcode & 0b1111);
+        fwrite(&byte, 1, 1, tmp);
+
+        byte = 0; /* put in at end with hack */
+        fwrite(&byte, 1, 1, tmp);
+      }
+
+      fprintf(tmp, "%zu, ", c->id);
+
+      fwrite(c->ws_req.payload, c->ws_req.payload_len, 1, tmp);
+
+      fclose(tmp);
+    }
+
+    out[1] = out_len - 2;
 
     /* reset response and copy in our new response */
-    other->res.buf = buf;
-    other->res.buf_len = buf_len;
+    other->res.buf = out;
+    other->res.buf_len = out_len;
   }
 
   return 0;
@@ -467,8 +573,10 @@ int main() {
           continue;
         }
 
-        Client *c = clients + (client_i++);
+        size_t client_id = client_i++;
+        Client *c = clients + (client_id);
         *c = (Client) {
+          .id = client_id,
           .phase = ClientPhase_HttpRequesting,
           .net_fd = fd,
         };
