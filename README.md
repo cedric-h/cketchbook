@@ -6,9 +6,9 @@ This is a simple C program that, when run, hosts a web server. This webserver se
 
 # from scratch?
 
-This program hosts an HTTP server using Berkeley Sockets (`socket()`/`bind()`/`accept()` etc.).
+This program hosts an HTTP server using [Berkeley Sockets](https://en.wikipedia.org/wiki/Berkeley_sockets) (`socket()`/`bind()`/`accept()` etc.).
 
-It supports multiple active websockets connections on a single thread using non-blocking IO (`fcntl` with `O_NONBLOCK`) and `poll.h`.
+It supports multiple active websockets connections on a single thread using [non-blocking IO](https://www.kegel.com/dkftpbench/nonblocking.html) (`fcntl` with `O_NONBLOCK`) and [`poll.h`](https://man7.org/linux/man-pages/man2/poll.2.html).
 
 
 # dev
