@@ -6,7 +6,7 @@ This is a simple C program that, when run, hosts a web server. This webserver se
 
 # from scratch?
 
-This program hosts HTTP server using Berkeley Sockets (`socket()`/`bind()`/`accept()` etc.).
+This program hosts an HTTP server using Berkeley Sockets (`socket()`/`bind()`/`accept()` etc.).
 
 It supports multiple active websockets connections on a single thread using non-blocking IO (`fcntl` with `O_NONBLOCK`) and `poll.h`.
 
@@ -15,9 +15,9 @@ It supports multiple active websockets connections on a single thread using non-
 
 Rebuild whenever any of the code changes
 
-- `find page.c | entr -rs 'clear && gcc -g page.c && ./a.out'`
+- [`find *.c *.h | entr -rs 'clear && gcc -g page.c && ./a.out'`](https://github.com/eradman/entr)
 
 
 See what's being sent over the websocket
 
-- `wscat --connect ws:localhost:8081/chat`
+- [`wscat --connect ws:localhost:8081/chat`](https://github.com/websockets/wscat)
