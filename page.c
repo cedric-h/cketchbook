@@ -429,9 +429,9 @@ static void client_drop(Client *c) {
   /* free everything, remove from parent list, idk? */
 }
 
-static int client_ws_handle_request(Client *c, Client clients[10]) {
+static int client_ws_handle_request(Client *c, Client clients[1000]) {
 
-  for (int i = 0; i < 10; i++) {
+  for (int i = 0; i < 1000; i++) {
     Client *other = clients + i;
     if (other->phase != ClientPhase_Websocket) continue;
     /* right now we can only write out one message at at time */
@@ -536,6 +536,9 @@ static int client_http_handle_request(Client *c) {
 
 int main() {
 
+  /* easier to just handle SIGPIPE ourselves */
+  signal(SIGPIPE, SIG_IGN);
+
   int fd = host_bind(NULL, "8081");
 
   if (fd < 0) {
@@ -547,8 +550,8 @@ int main() {
   poll_any_event |= /* all the reads  */ POLLPRI | POLLRDNORM | POLLRDBAND;
 
 
-#define CLIENT_MAX 10
-  Client clients[10] = {0};
+#define CLIENT_MAX 1000
+  Client clients[1000] = {0};
   size_t client_i = 0;
 
   /*
@@ -590,7 +593,7 @@ int main() {
     /* now see if any clients need responding to */
     {
       struct pollfd client_polls[CLIENT_MAX] = {0};
-      for (int i = 0; i < 10; i++) {
+      for (int i = 0; i < 1000; i++) {
         client_polls[i].fd = clients[i].net_fd;
         client_polls[i].events = poll_any_event;
       }
