@@ -10,9 +10,11 @@ This program hosts an HTTP server using [Berkeley Sockets](https://en.wikipedia.
 
 It supports multiple active websockets connections on a single thread using [non-blocking IO](https://www.kegel.com/dkftpbench/nonblocking.html) (`fcntl` with `O_NONBLOCK`).
 
-My argument to support the claim that using Berkeley Sockets is making a webserver "from scratch" is the sockets API is provided by the operating system, rather than a third party. They're about as low-level as you can go while still having a program that works across platforms. Indeed, one could implement a similar collaborative drawing program using e.g. Express in Node, which would still make use of Berkeley sockets internally through libuv. More generally, you can find Berkeley sockets at the core of most programs that host HTTP servers, regardless of what language they're implemented in.
+My argument to support the claim that using Berkeley Sockets is making a webserver "from scratch" is that the sockets API is provided by the operating system, rather than a third party.
 
-You can go lower-level and make use of operating system specific APIs for doing networking - or perhaps I should make my own RTOS and NIC driver - but choosing to use C and Berkeley sockets maintains some degree of applicability to the higher level software to make webservers that I use day-to-day, which makes it more valuable as an educational exercise.
+They're about as low-level as you can go while still having a program that works across platforms. Consider: one could implement a similar collaborative drawing program using e.g. Express in Node, which would still make use of Berkeley sockets internally through libuv. As it turns out, you can find Berkeley sockets at the core of most programs that host HTTP servers, regardless of what language they're implemented in.
+
+You can go lower-level of course and make use of operating system specific APIs for doing networking - or perhaps I should make my own RTOS and NIC driver - but choosing to use C and Berkeley sockets maintains some degree of applicability to the higher level software to make webservers that I use day-to-day, which makes it more valuable as an educational exercise.
 
 # dev
 

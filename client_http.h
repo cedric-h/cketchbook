@@ -98,7 +98,7 @@
 "  </body>\r\n" \
 "</html>\r\n"
 
-static int client_http_handle_request(Client *c) {
+static int client_http_respond_to_request(Client *c) {
 
   char path[31] = {0};
   char key[31] = {0};
@@ -156,4 +156,70 @@ static int client_http_handle_request(Client *c) {
   }
 
   return 0;
+}
+
+static ClientStepResult client_http_read_request(Client *c) {
+  for (;;) {
+    char byte;
+    int read_ret = read(c->net_fd, &byte, 1);
+    if (read_ret < 0) {
+      if (errno != EWOULDBLOCK && errno != EAGAIN) {
+        perror("client read()");
+        return ClientStepResult_Error;
+      }
+      break;
+    }
+
+    fwrite(&byte, 1, 1, c->http_req.file);
+    c->http_req.bytes_read++;
+
+    if (c->http_req.bytes_read > MAX_MESSAGE_SIZE)
+      return ClientStepResult_Error;
+
+    /* ignore carriage return */
+    if (byte != 0x0D) {
+      /* track line feeds */
+      if (byte == 0x0A) {
+        if (c->http_req.seen_linefeed) {
+          if (client_http_respond_to_request(c) < 0)
+            return ClientStepResult_Error;
+          return ClientStepResult_Restart;
+        }
+        c->http_req.seen_linefeed = 1;
+      } else {
+        c->http_req.seen_linefeed = 0;
+      }
+    }
+  }
+
+  return ClientStepResult_NoAction;
+}
+
+static ClientStepResult client_http_write_response(Client *c) {
+  while (c->res.progress < c->res.buf_len) {
+    char byte = c->res.buf[c->res.progress];
+    size_t wlen = write(c->net_fd, &byte, 1);
+
+    if (wlen < 0) {
+      if (errno != EWOULDBLOCK && errno != EAGAIN) {
+        perror("client write()");
+        return ClientStepResult_Error;
+      }
+      return ClientStepResult_NoAction;
+    }
+
+    /* important to only increase this if write succeeds */
+    c->res.progress += 1;
+  }
+
+  if (c->res.progress == c->res.buf_len) {
+    if (c->res.phase_after_http == ClientPhase_Empty) {
+      return ClientStepResult_Error;
+    } else {
+      c->phase = c->res.phase_after_http;
+      return ClientStepResult_Restart;
+    }
+  }
+
+  return ClientStepResult_NoAction;
 }

@@ -14,7 +14,6 @@ typedef struct {
 static int server_init(Server *server);
 
 static void server_add_client(Server *server, int net_fd);
-static size_t server_next_id(Server *server);
 
 static int server_step_client(Server *server, Client *c);
 static int server_ws_handle_request(Server *server, Client *c);
@@ -36,13 +35,9 @@ static int server_init(Server *server) {
   return 0;
 }
 
-static size_t server_next_id(Server *server) {
-  return server->client_id_i++;
-}
-
 static void server_add_client(Server *server, int net_fd) {
   Client *c = malloc(sizeof(Client));
-  client_init(c, net_fd, server_next_id(server));
+  client_init(c, net_fd, server->client_id_i++);
   c->next = server->last_client;
   server->last_client = c;
 }
@@ -104,6 +99,10 @@ static int server_step_client(Server *server, Client *client) {
     } break;
 
     case ClientStepResult_NoAction: {
+    } break;
+
+    case ClientStepResult_Restart: {
+      goto restart;
     } break;
 
     case ClientStepResult_WsMessageReady: {

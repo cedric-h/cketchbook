@@ -34,6 +34,90 @@ static void client_ws_send_text(Client *c, char *text, size_t text_len) {
   c->res.buf_len = out_len;
 }
 
+static ClientStepResult client_ws_step(Client *c) {
+  /* first, let's send out anything we can */
+  {
+    while (c->res.progress < c->res.buf_len) {
+      char byte = c->res.buf[c->res.progress];
+      size_t wlen = write(c->net_fd, &byte, 1);
+
+      if (wlen < 0) {
+        if (errno != EWOULDBLOCK && errno != EAGAIN) {
+          perror("client write()");
+          return ClientStepResult_Error;
+        }
+        break;
+      }
+
+      /* important to only increase this if write succeeds */
+      c->res.progress += 1;
+    }
+
+    if (c->res.progress == c->res.buf_len) {
+      /* done writing, we can reset response */
+      free(c->res.buf);
+      memset(&c->res, 0, sizeof(c->res));
+    }
+  }
+
+  /* now let's see if there's anything to receive */
+  for (;;) {
+    char byte;
+    int read_ret = read(c->net_fd, &byte, 1);
+    if (read_ret == 0) break;
+    else if (read_ret < 0) {
+      if (errno != EWOULDBLOCK && errno != EAGAIN) {
+        return ClientStepResult_Error;
+      }
+      break;
+    }
+
+    int progress = ++c->ws_req.progress;
+
+    if (c->ws_req.progress > MAX_MESSAGE_SIZE)
+      return ClientStepResult_Error;
+
+    if (progress == 1) {
+      c->ws_req.fin    = (byte >> 7) & 1;
+      c->ws_req.opcode = (byte >> 0) & 0b1111;
+      continue;
+    }
+
+    if (progress == 2) {
+      c->ws_req.has_mask    = (byte >> 7) & 1;
+      c->ws_req.payload_len = (byte >> 0) & 127;
+      if (c->ws_req.payload_len == 127 ||
+          c->ws_req.payload_len == 126) {
+        fprintf(
+          stderr,
+          "WS payloads > 126 bytes are not yet supported!\n"
+        );
+        return ClientStepResult_Error;
+      }
+      c->ws_req.payload = malloc(c->ws_req.payload_len);
+      continue;
+    }
+
+    int mask_progress = progress - 3;
+    if (c->ws_req.has_mask && mask_progress < 4) {
+      c->ws_req.mask[mask_progress] = byte;
+      continue;
+    }
+
+    /* unmask the payload */
+    int payload_progress = mask_progress - 4;
+    uint8_t mask_byte = c->ws_req.mask[payload_progress % 4];
+    c->ws_req.payload[payload_progress] = byte ^ mask_byte;
+
+    /* handle the final payload */
+    if (payload_progress == (c->ws_req.payload_len - 1))
+      return ClientStepResult_WsMessageReady;
+
+  }
+
+  return ClientStepResult_NoAction;
+}
+
 static void client_ws_fwrite_sec_accept(
   FILE *out,
   const char *sec_websocket_key
