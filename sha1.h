@@ -1,3 +1,5 @@
+// vim: sw=2 ts=2 expandtab smartindent
+
 /* source: https://github.com/halloweeks/sha1/blob/main/sha1.h */
 
 #ifndef SHA1_H
