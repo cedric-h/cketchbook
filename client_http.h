@@ -15,7 +15,7 @@
 "  <body>\r\n" \
 "    <canvas id='pagecanvas'></canvas>\r\n" \
 "    <script>'use strict'; (async () => {\r\n" \
-"const ws = new WebSocket('/chat');\r\n" \
+"const ws = new WebSocket(window.location.href + '/chat');\r\n" \
 "await new Promise(res => ws.onopen = res);\r\n" \
 "\r\n" \
 "const canvas = document.getElementById('pagecanvas');\r\n" \
@@ -132,6 +132,7 @@ static int client_http_respond_to_request(Client *c) {
     free(c->http_req.buf);
     c->http_req.buf = NULL;
   }
+  fprintf(stderr, "path = \"%s\"\n", path);
 
   c->phase = ClientPhase_HttpResponding;
   c->res.phase_after_http = ClientPhase_Empty;

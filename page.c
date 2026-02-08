@@ -6,6 +6,7 @@
 #include <errno.h>
 
 #include <arpa/inet.h>
+#include <signal.h>
 #include <netdb.h>
 #include <fcntl.h>
 
