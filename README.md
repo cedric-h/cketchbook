@@ -29,3 +29,13 @@ See what's being sent over the websocket
 
 Run with leak/memory checking:
 - [`gcc -Wall -Werror -O0 -g page.c && valgrind --leak-check=yes ./a.out`](https://valgrind.org/docs/manual/quick-start.html)
+
+Example nginx reverse proxy:
+```nginx
+	location /draw/ {
+		proxy_pass http://localhost:8081/;
+		proxy_http_version 1.1;
+		proxy_set_header Upgrade $http_upgrade;
+		proxy_set_header Connection "upgrade";
+	}
+```
