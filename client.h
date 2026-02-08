@@ -9,6 +9,17 @@ typedef enum ClientPhase {
   ClientPhase_Websocket,
 } ClientPhase;
 
+typedef struct ClientResponse {
+  struct ClientResponse *next;
+  /* used during ClientPhase_HttpResponding to decide where
+   * to go when the request is finished being sent out. */
+  ClientPhase phase_after_http;
+
+  /* response data goes in here */
+  char *buf;
+  size_t buf_len, progress;
+} ClientResponse;
+
 /**
  * If any HTTP or Websocket message over this size,
  * we drop the client.
@@ -40,13 +51,7 @@ typedef struct Client {
     char *payload;
   } ws_req;
 
-  struct {
-    /* response data goes in here */
-    char *buf;
-    size_t buf_len, progress;
-
-    ClientPhase phase_after_http;
-  } res;
+  ClientResponse res;
 
 } Client;
 
@@ -63,7 +68,11 @@ static ClientStepResult client_step(Client *c);
 static void client_drop(Client *c);
 
 static int client_http_respond_to_request(Client *c);
-static void client_ws_send_text(Client *c, char *text, size_t text_len);
+static void client_ws_send_text(
+  ClientResponse *res,
+  char *text,
+  size_t text_len
+);
 
 #endif
 

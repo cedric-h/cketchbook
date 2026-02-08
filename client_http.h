@@ -33,14 +33,26 @@
 "  server_paths: new Map(),\r\n" \
 "};\r\n" \
 "ws.onmessage = msg => {\r\n" \
-"  const [user_id, path_id, x, y] = msg\r\n" \
+"  const [action, user_id, path_id, x, y] = msg\r\n" \
 "    .data\r\n" \
 "    .split(', ')\r\n" \
 "    .map(x => parseInt(x));\r\n" \
 "  const path_hash = user_id + '_' + path_id;\r\n" \
 "  if (!input.server_paths.has(path_hash))\r\n" \
 "    input.server_paths.set(path_hash, []);\r\n" \
-"  input.server_paths.get(path_hash).push({ x, y });\r\n" \
+"  if (action == 1) input.server_paths.get(path_hash).push({ x, y });\r\n" \
+"  else if (action == 2) {\r\n" \
+"    input.server_paths.set(\r\n" \
+"      path_hash,\r\n" \
+"      input\r\n" \
+"        .server_paths\r\n" \
+"        .get(path_hash)\r\n" \
+"        .filter(p => {\r\n" \
+"          const delta = Math.sqrt((p.x - x)*(p.x - x) + (p.y - y)*(p.y - y));\r\n" \
+"          return delta > 1;\r\n" \
+"        })\r\n" \
+"    );\r\n" \
+"  }\r\n" \
 "};\r\n" \
 "\r\n" \
 "canvas.onmousedown = ev => {\r\n" \
@@ -200,7 +212,7 @@ static ClientStepResult client_http_write_response(Client *c) {
     char byte = c->res.buf[c->res.progress];
     size_t wlen = write(c->net_fd, &byte, 1);
 
-    if (wlen < 0) {
+    if (wlen < 1) {
       if (errno != EWOULDBLOCK && errno != EAGAIN) {
         perror("client write()");
         return ClientStepResult_Error;
@@ -217,6 +229,10 @@ static ClientStepResult client_http_write_response(Client *c) {
       return ClientStepResult_Error;
     } else {
       c->phase = c->res.phase_after_http;
+
+      free(c->res.buf);
+      memset(&c->res, 0, sizeof(c->res));
+
       return ClientStepResult_Restart;
     }
   }

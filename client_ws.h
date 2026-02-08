@@ -1,8 +1,12 @@
 // vim: sw=2 ts=2 expandtab smartindent
 
-static void client_ws_send_text(Client *c, char *text, size_t text_len) {
+static void client_ws_send_text(
+  ClientResponse *res,
+  char *text,
+  size_t text_len
+) {
   /* right now we can only write out one message at at time */
-  if (c->res.progress != 0) return;
+  if (res->progress != 0) return;
 
   char *out;
   size_t out_len;
@@ -30,18 +34,18 @@ static void client_ws_send_text(Client *c, char *text, size_t text_len) {
   out[1] = out_len - 2;
 
   /* reset response and copy in our new response */
-  c->res.buf = out;
-  c->res.buf_len = out_len;
+  res->buf = out;
+  res->buf_len = out_len;
 }
 
 static ClientStepResult client_ws_step(Client *c) {
   /* first, let's send out anything we can */
-  {
+  if (c->res.buf_len > 0) {
     while (c->res.progress < c->res.buf_len) {
       char byte = c->res.buf[c->res.progress];
       size_t wlen = write(c->net_fd, &byte, 1);
 
-      if (wlen < 0) {
+      if (wlen < 1) {
         if (errno != EWOULDBLOCK && errno != EAGAIN) {
           perror("client write()");
           return ClientStepResult_Error;
@@ -54,9 +58,16 @@ static ClientStepResult client_ws_step(Client *c) {
     }
 
     if (c->res.progress == c->res.buf_len) {
+      ClientResponse *next = c->res.next;
+
       /* done writing, we can reset response */
       free(c->res.buf);
       memset(&c->res, 0, sizeof(c->res));
+
+      if (next) {
+        c->res = *next;
+        free(next);
+      }
     }
   }
 
