@@ -15,7 +15,7 @@
 "  <body>\r\n" \
 "    <canvas id='pagecanvas'></canvas>\r\n" \
 "    <script>'use strict'; (async () => {\r\n" \
-"const ws = new WebSocket(window.location.href + '/chat');\r\n" \
+"const ws = new WebSocket(window.location.href.replace(/\\/$/, '') + '/chat');\r\n" \
 "await new Promise(res => ws.onopen = res);\r\n" \
 "\r\n" \
 "const canvas = document.getElementById('pagecanvas');\r\n" \
