@@ -116,13 +116,16 @@ static int client_http_respond_to_request(Client *c) {
   char key[31] = {0};
   {
     fclose(c->http_req.file);
+    c->http_req.file = NULL;
 
     /* cannot fscanf a memstream, can fscanf an fmemopen */
     /* (can grow a memstream, cannot grow an fmemopen) */
     FILE *req = fmemopen(c->http_req.buf, c->http_req.buf_len, "r");
 
-    if (fscanf(req, "GET %30s HTTP/1.1\r\n", path) == 0)
+    if (fscanf(req, "GET %30s HTTP/1.1\r\n", path) == 0) {
+      fclose(req);
       return -1;
+    }
 
     while (fscanf(req, "Sec-WebSocket-Key: %30s\r\n", key) <= 0)
       if (fscanf(req, "%*[^\n]\n") == EOF)
@@ -175,7 +178,7 @@ static ClientStepResult client_http_read_request(Client *c) {
   for (;;) {
     char byte;
     int read_ret = read(c->net_fd, &byte, 1);
-    if (read_ret < 0) {
+    if (read_ret < 1) {
       if (errno != EWOULDBLOCK && errno != EAGAIN) {
         perror("client read()");
         return ClientStepResult_Error;
@@ -211,7 +214,7 @@ static ClientStepResult client_http_read_request(Client *c) {
 static ClientStepResult client_http_write_response(Client *c) {
   while (c->res.progress < c->res.buf_len) {
     char byte = c->res.buf[c->res.progress];
-    size_t wlen = write(c->net_fd, &byte, 1);
+    ssize_t wlen = write(c->net_fd, &byte, 1);
 
     if (wlen < 1) {
       if (errno != EWOULDBLOCK && errno != EAGAIN) {

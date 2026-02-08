@@ -95,7 +95,28 @@ static void client_init(Client *c, int net_fd, size_t client_id) {
 }
 
 static void client_drop(Client *c) {
+  if (c->phase == ClientPhase_HttpRequesting) {
+    if (c->http_req.file != NULL)
+      fclose(c->http_req.file);
+    if (c->http_req.buf != NULL)
+      free(c->http_req.buf);
+  }
+
   c->phase = ClientPhase_Empty;
+
+  /* free any lingering queued ClientResponses */
+  if (c->res.next) {
+    ClientResponse *last = c->res.next;
+    for (
+      ClientResponse *next = last->next;
+      last;
+      last = next
+    ) {
+      next = last->next;
+      free(last->buf);
+      free(last);
+    }
+  }
 
   if (c->http_req.buf     != NULL) free(c->http_req.buf);
   if (c->  ws_req.payload != NULL) free(c->ws_req.payload);

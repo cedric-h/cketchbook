@@ -43,7 +43,7 @@ static ClientStepResult client_ws_step(Client *c) {
   if (c->res.buf_len > 0) {
     while (c->res.progress < c->res.buf_len) {
       char byte = c->res.buf[c->res.progress];
-      size_t wlen = write(c->net_fd, &byte, 1);
+      ssize_t wlen = write(c->net_fd, &byte, 1);
 
       if (wlen < 1) {
         if (errno != EWOULDBLOCK && errno != EAGAIN) {

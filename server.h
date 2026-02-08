@@ -49,7 +49,7 @@ static int server_init(Server *server) {
 }
 
 static void server_add_client(Server *server, int net_fd) {
-  Client *c = malloc(sizeof(Client));
+  Client *c = calloc(sizeof(Client), 1);
   client_init(c, net_fd, server->client_id_i++);
   c->next = server->last_client;
   server->last_client = c;
@@ -119,11 +119,12 @@ static void server_broadcast_clientpoint(
     ClientResponse *r = &other->res;
     for (; r->progress < r->buf_len; r = r->next) {
       if (r->next == NULL) {
-        r->next = malloc(sizeof(ClientResponse));
+        r->next = calloc(sizeof(ClientResponse), 1);
         r = r->next;
         break;
       }
     }
+
     client_ws_send_text(r, msg, msg_len);
   }
 
@@ -138,8 +139,10 @@ static int server_ws_handle_request(Server *server, Client *c) {
   ClientPoint cp = { .action = ClientPointAction_Add, .client_id = c->id };
   {
     FILE *req = fmemopen(c->ws_req.payload, c->ws_req.payload_len, "r");
-    if (clientpoint_fscan(&cp, req) < 0)
+    if (clientpoint_fscan(&cp, req) < 0) {
+      fclose(req);
       return -1;
+    }
     fclose(req);
   }
 
@@ -207,7 +210,7 @@ static int server_step_client(Server *server, Client *client) {
       if (!cp->action) break;
 
       ClientResponse *r = (last->buf) ?
-        malloc(sizeof(ClientResponse)) :
+        calloc(sizeof(ClientResponse), 1) :
         last;
 
       {

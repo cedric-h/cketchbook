@@ -26,3 +26,6 @@ Rebuild whenever any of the code changes
 See what's being sent over the websocket
 
 - [`wscat --connect ws:localhost:8081/chat`](https://github.com/websockets/wscat)
+
+Run with leak/memory checking:
+- [`gcc -Wall -Werror -O0 -g page.c && valgrind --leak-check=yes ./a.out`](https://valgrind.org/docs/manual/quick-start.html)

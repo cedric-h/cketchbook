@@ -153,6 +153,9 @@ static int socket_accept_client(int server_fd) {
     name = tmp;
   }
   fprintf(stderr, "accepting connection from: %s\n", name);
+
+  /* note: on macos, this is not necessary - only set it on parent! */
+  fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
   return fd;
 }
 #endif
