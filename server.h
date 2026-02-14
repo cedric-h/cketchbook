@@ -26,6 +26,7 @@ typedef struct {
 
 static int server_init(Server *server);
 
+static size_t server_client_count(Server *server);
 static void server_add_client(Server *server, int net_fd);
 
 static int server_step_client(Server *server, Client *c);
@@ -48,6 +49,13 @@ static int server_init(Server *server) {
   return 0;
 }
 
+static size_t server_client_count(Server *server) {
+  size_t ret = 0;
+  for (Client *c = server->last_client; c; c = c->next)
+    ret++;
+  return ret;
+}
+
 static void server_add_client(Server *server, int net_fd) {
   Client *c = calloc(sizeof(Client), 1);
   client_init(c, net_fd, server->client_id_i++);
@@ -56,6 +64,8 @@ static void server_add_client(Server *server, int net_fd) {
 }
 
 static void server_drop_client(Server *server, Client *c) {
+  puts("Dropping client!");
+
   client_drop(c);
 
   if (server->last_client == c) {
