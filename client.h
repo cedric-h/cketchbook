@@ -33,6 +33,9 @@ typedef struct Client {
   size_t id;
   int net_fd; /* net fd from accept() */
 
+  /* used for dropping clients that aren't doing anything */
+  time_t last_activity, last_ping;
+
   /* requesting */
   struct {
     FILE *file; /* closed after requesting */
@@ -57,6 +60,14 @@ typedef struct Client {
 
 static void client_init(Client *c, int net_fd, size_t client_id);
 
+/**
+ * Tells hte server which events are worth waking up for.
+ * Important not to subscribe to an event you don't handle,
+ * otherwise the server will keep waking up and asking you
+ * to handle it, which will burn a lot of CPU cycles.
+ **/
+static short client_events_subscription(Client *c);
+
 typedef enum {
   ClientStepResult_Error,
   ClientStepResult_NoAction,
@@ -69,12 +80,13 @@ static void client_drop(Client *c);
 
 static int client_http_respond_to_request(Client *c);
 static void client_ws_send_text(
-  ClientResponse *res,
+  Client *c,
   char *text,
   size_t text_len
 );
 
 #endif
+
 
 
 #ifdef client_IMPLEMENTATION
@@ -85,6 +97,8 @@ static void client_ws_send_text(
 static void client_init(Client *c, int net_fd, size_t client_id) {
   *c = (Client) {
     .id = client_id,
+    .last_activity = time(NULL),
+    .last_ping = time(NULL),
     .phase = ClientPhase_HttpRequesting,
     .net_fd = net_fd,
   };
@@ -118,14 +132,47 @@ static void client_drop(Client *c) {
     }
   }
 
-  if (c->http_req.buf     != NULL) free(c->http_req.buf);
   if (c->  ws_req.payload != NULL) free(c->ws_req.payload);
   if (c->     res.buf     != NULL) free(c->res.buf);
 
   close(c->net_fd);
 }
 
+static short client_events_subscription(Client *c) {
+  short events = 0;
+  short events_writes = POLLWRNORM | POLLWRBAND          ;
+  short events_reads  = POLLRDNORM | POLLRDBAND | POLLPRI;
+
+  switch (c->phase) {
+    case ClientPhase_Empty: {
+      /* this probably shouldn't happen */
+      fprintf(stderr, "empty client!?\n");
+    } break;
+    case ClientPhase_HttpRequesting: {
+      events = events_writes;
+    } break;
+    case ClientPhase_HttpResponding: {
+      events = events_reads;
+    } break;
+    case ClientPhase_Websocket: {
+      events = events_reads;
+      if (c->res.buf_len > 0) events |= events_writes;
+    } break;
+  }
+
+  return events;
+}
+
 static ClientStepResult client_step(Client *c) {
+
+  if ((c->phase == ClientPhase_HttpRequesting) ||
+      (c->phase == ClientPhase_HttpRequesting)) {
+    long int time_since_io = time(NULL) - c->last_activity;
+
+    /* timeout */
+    if (time_since_io > 1)
+      return ClientStepResult_Error;
+  }
 
   switch (c->phase) {
 

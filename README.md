@@ -30,7 +30,11 @@ See what's being sent over the websocket
 Run with leak/memory checking:
 - [`gcc -Wall -Werror -O0 -g page.c && valgrind --leak-check=yes ./a.out`](https://valgrind.org/docs/manual/quick-start.html)
 
-Example nginx reverse proxy:
+# deployment
+
+## Example nginx reverse proxy:
+in `/etc/nginx/sites-available/default`, in a `server` block
+
 ```nginx
 	location /draw/ {
 		proxy_pass http://localhost:8081/;
@@ -39,3 +43,24 @@ Example nginx reverse proxy:
 		proxy_set_header Connection "upgrade";
 	}
 ```
+
+## Example systemctl file
+in: `/etc/systemd/system/cedquestdraw.service`
+```
+[Unit]
+Description=Collaborative drawing program (https://github.com/cedric-h/ck
+etchbook)
+
+[Service]
+ExecStart=/home/ubuntu/cketchbook/a.out
+
+[Install]
+WantedBy=multi-user.target
+```
+systemd commands:
+- See the status:
+`sudo systemctl status cedquestdraw`
+- Configure whether or not it runs on startup:
+`sudo systemctl enable/disable cedquestdraw`
+- Configure whether or not it's currently running:
+`sudo systemctl start/stop cedquestdraw`
