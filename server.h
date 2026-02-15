@@ -22,10 +22,24 @@ typedef struct {
   size_t client_id_i;
   /* The head of the linked list of clients */
   Client *last_client;
+
+  struct pollfd *pollfds;
+  nfds_t pollfd_count;
 } Server;
 
 static int server_init(Server *server);
+static void server_free(Server *server);
 
+/**
+ * wait indefinitely until there is work to be done!
+ **/
+static void server_poll(Server *server);
+
+/* these functions help you process the output of the poll */
+static short server_new_client_revent(Server *server);
+static short server_client_get_revents(Server *server, Client *c);
+
+static size_t server_client_count(Server *server);
 static void server_add_client(Server *server, int net_fd);
 
 static int server_step_client(Server *server, Client *c);
@@ -46,6 +60,67 @@ static int server_init(Server *server) {
   }
 
   return 0;
+}
+
+static void server_free(Server *server) {
+
+  /* free all the clients */
+  for (Client *next = NULL, *c = server->last_client; c; c = next) {
+    next = c->next;
+    server_drop_client(server, c);
+  }
+
+  close(server->host_fd);
+
+  free(server->pollfds);
+}
+
+static short server_new_client_revent(Server *server) {
+  /* first fd is always the socket */
+  return server->pollfds[0].revents;
+}
+
+static short server_client_get_revents(Server *server, Client *c) {
+  for (int i = 0; i < server->pollfd_count; i++)
+    if (server->pollfds[i].fd == c->net_fd)
+      return server->pollfds[i].revents;
+  return 0;
+}
+
+static void server_poll(Server *server) {
+restart:
+  server->pollfd_count = 1 + server_client_count(server);
+  server->pollfds = reallocarray(
+    server->pollfds,
+    server->pollfd_count,
+    sizeof(struct pollfd)
+  );
+
+  struct pollfd *fd_w = server->pollfds;
+
+  /* first fd is always the socket */
+  *fd_w++ = (struct pollfd) { .events = POLLIN, .fd = server->host_fd };
+
+  /* create pollfds for our clients */
+  for (Client *c = server->last_client; c; c = c->next)
+    *fd_w++ = (struct pollfd) {
+      .events = client_events_subscription(c),
+      .fd = c->net_fd
+    };
+
+  printf("polling ... %lu\n", time(NULL));
+  size_t updated = poll(server->pollfds, server->pollfd_count, -1);
+  if (updated < 0) {
+    perror("poll():");
+    goto restart;
+  }
+}
+
+static size_t server_client_count(Server *server) {
+  size_t ret = 0;
+  for (Client *c = server->last_client; c; c = c->next)
+    ret++;
+  return ret;
 }
 
 static void server_add_client(Server *server, int net_fd) {
@@ -116,16 +191,7 @@ static void server_broadcast_clientpoint(
   ) {
     if (other->phase != ClientPhase_Websocket) continue;
 
-    ClientResponse *r = &other->res;
-    for (; r->progress < r->buf_len; r = r->next) {
-      if (r->next == NULL) {
-        r->next = calloc(sizeof(ClientResponse), 1);
-        r = r->next;
-        break;
-      }
-    }
-
-    client_ws_send_text(r, msg, msg_len);
+    client_ws_send_text(other, msg, msg_len);
   }
 
   free(msg);
@@ -204,14 +270,9 @@ static int server_step_client(Server *server, Client *client) {
   if (client->phase != phase_before &&
       client->phase == ClientPhase_Websocket) {
 
-    ClientResponse *last = &client->res;
     for (int i = 0; i < POINT_COUNT; i++) {
       ClientPoint *cp = server->points + i;
       if (!cp->action) break;
-
-      ClientResponse *r = (last->buf) ?
-        calloc(sizeof(ClientResponse), 1) :
-        last;
 
       {
         char *msg;
@@ -222,15 +283,15 @@ static int server_step_client(Server *server, Client *client) {
           fclose(tmp);
         }
 
-        client_ws_send_text(r, msg, msg_len);
+        /**
+         * a bit schlemiel-the-painter here,
+         * will walk to the end of response list
+         * to find where to put the next response ...
+         **/
+        client_ws_send_text(client, msg, msg_len);
 
         free(msg);
       }
-
-      if (last != r) {
-        last->next = r;
-      }
-      last = r;
     }
 
     phase_before = ClientPhase_Websocket;

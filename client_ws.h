@@ -1,12 +1,25 @@
 // vim: sw=2 ts=2 expandtab smartindent
 
+static ClientResponse *client_ws_next_res(Client *c) {
+    ClientResponse *r = &c->res;
+
+    for (; r->progress < r->buf_len; r = r->next) {
+      if (r->next == NULL) {
+        r->next = calloc(sizeof(ClientResponse), 1);
+        r = r->next;
+        return r;
+      }
+    }
+
+    return r;
+}
+
 static void client_ws_send_text(
-  ClientResponse *res,
+  Client *c,
   char *text,
   size_t text_len
 ) {
-  /* right now we can only write out one message at at time */
-  if (res->progress != 0) return;
+  ClientResponse *res = client_ws_next_res(c);
 
   char *out;
   size_t out_len;
@@ -39,6 +52,30 @@ static void client_ws_send_text(
 }
 
 static ClientStepResult client_ws_step(Client *c) {
+
+  /* ping if inactive; this gets rid of dead websockets */
+  {
+    time_t now = time(NULL);
+    long int time_since_io = now - c->last_activity;
+    long int time_since_ping = now - c->last_ping;
+    if (time_since_io > 1 && time_since_ping > 1) {
+      c->last_ping = now;
+
+      /* should probably just use an actual ping packet,
+       * but this works and it's kind of funny ... */
+      char *out;
+      size_t out_len;
+      FILE *tmp = open_memstream(&out, &out_len);
+      {
+        fprintf(tmp, "0, 0, 0, 0");
+        fclose(tmp);
+      }
+      client_ws_send_text(c, out, out_len);
+
+      free(out);
+    }
+  }
+
   /* first, let's send out anything we can */
   if (c->res.buf_len > 0) {
     while (c->res.progress < c->res.buf_len) {
@@ -56,6 +93,8 @@ static ClientStepResult client_ws_step(Client *c) {
       /* important to only increase this if write succeeds */
       c->res.progress += 1;
     }
+
+    c->last_activity = time(NULL);
 
     if (c->res.progress == c->res.buf_len) {
       ClientResponse *next = c->res.next;
@@ -83,6 +122,7 @@ static ClientStepResult client_ws_step(Client *c) {
       break;
     }
 
+    c->last_activity = time(NULL);
     int progress = ++c->ws_req.progress;
 
     if (c->ws_req.progress > MAX_MESSAGE_SIZE)
