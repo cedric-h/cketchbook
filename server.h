@@ -13,7 +13,7 @@ typedef struct {
   double x, y;
 } ClientPoint;
 
-#define POINT_COUNT 1000
+#define POINT_COUNT 2269
 typedef struct {
   ClientPoint points[POINT_COUNT];
   size_t points_i;

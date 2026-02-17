@@ -55,16 +55,16 @@
 "  }\r\n" \
 "};\r\n" \
 "\r\n" \
-"canvas.onmousedown = ev => {\r\n" \
+"canvas.onpointerdown = ev => {\r\n" \
 "  ev.preventDefault();\r\n" \
 "  input.mouse_down = true;\r\n" \
 "  input.local_paths.push([]);\r\n" \
 "};\r\n" \
-"canvas.onmouseup = ev => {\r\n" \
+"canvas.onpointerup = ev => {\r\n" \
 "  ev.preventDefault();\r\n" \
 "  input.mouse_down = false;\r\n" \
 "};\r\n" \
-"canvas.onmousemove = ev => {\r\n" \
+"canvas.onpointermove = ev => {\r\n" \
 "  ev.preventDefault();\r\n" \
 "  if (!input.mouse_down) return false;\r\n" \
 "  const x = ev.clientX * window.devicePixelRatio;\r\n" \
