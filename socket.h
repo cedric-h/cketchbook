@@ -69,11 +69,13 @@ static int socket_host_bind(const char *host, const char *port) {
           perror("inet_ntop");
         }
 
+#if DEBUG
         if (sa->sa_family == AF_INET6) {
           fprintf(stderr, "binding to \"http://[%s]:%s\"\n", tmp, port);
         } else {
           fprintf(stderr, "binding to \"http://%s:%s\"\n", tmp, port);
         }
+#endif
       } else {
         fprintf(stderr, "<unknown family: %d>", (int)sa->sa_family);
       }
@@ -108,7 +110,9 @@ static int socket_host_bind(const char *host, const char *port) {
     close(fd);
     return -1;
   }
+#if DEBUG
   fprintf(stderr, "bound.\n");
+#endif
   return fd;
 }
 

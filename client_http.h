@@ -135,7 +135,9 @@ static int client_http_respond_to_request(Client *c) {
     free(c->http_req.buf);
     c->http_req.buf = NULL;
   }
+#if DEBUG
   fprintf(stderr, "path = \"%s\"\n", path);
+#endif
 
   c->phase = ClientPhase_HttpResponding;
   c->res.phase_after_http = ClientPhase_Empty;

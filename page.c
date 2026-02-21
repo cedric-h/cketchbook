@@ -16,6 +16,8 @@
 #include <fcntl.h>
 #include <poll.h>
 
+#define DEBUG 0
+
 /* hashing/encoding */
 #include "sha1.h"
 #include "base64.h"
@@ -23,6 +25,7 @@
 #include "socket.h"
 #include "client.h"
 #include "server.h"
+
 
 static volatile bool killed = false;
 void interrupt_handler(int _) { killed = true; }
